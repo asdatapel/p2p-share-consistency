@@ -23,7 +23,10 @@ void Client::init() {
 	readConfigFile();
 	connectToPeers();
 
-	listener.listen(listenerPort);
+	if (listener.listen(listenerPort) != sf::Socket::Done){
+		std::cout << "Could not bind socket. Please wait a short while before restarting\n";
+		exit(1);
+	}
 	listenerPort = listener.getLocalPort();
 	waiter.add(listener);
 
@@ -108,10 +111,10 @@ void Client::handleMessageFromNetwork(sf::Uint32 peerId) {
 
 	sf::Uint32 destId;
 	sf::Uint32 sourceId;
-	sf::Uint32 sequence;
+	sf::Uint32 seq;
 	sf::Uint32 ttl;
 	packet >> destId;
-	packet >> sourceId >> sequence;
+	packet >> sourceId >> seq;
 	packet >> ttl;
 
 	sf::Int32 message_type;
@@ -135,15 +138,15 @@ void Client::handleMessageFromNetwork(sf::Uint32 peerId) {
 
 		if (searchFile(filename)) {
 			sf::Packet response;
-			response << sourceId << sourceId << sequence << (sf::Uint32)0 << GIVE_FILE_LOCATION << filename << myID;
+			response << sourceId << sourceId << seq << (sf::Uint32)0 << GIVE_FILE_LOCATION << filename << myID;
 
 			peer->socket.send(response);
 
 			std::cout << "Query hit for file: " << filename << ". Sending file location upstream\n";
 		} else {
-			if (ttl > 0 && logQuery(peerId, sourceId, sequence, ttl)) {
+			if (ttl > 0 && logQuery(peerId, sourceId, seq, ttl)) {
 				sf::Packet forward;
-				forward << destId << sourceId << sequence << ttl - 1 << QUERY_FILE_LOCATION << filename;
+				forward << destId << sourceId << seq << ttl - 1 << QUERY_FILE_LOCATION << filename;
 
 				broadcastQuery(forward, peerId);
 				std::cout << "Forwarding query for file: " << filename << "\n";
@@ -175,20 +178,22 @@ void Client::handleMessageFromNetwork(sf::Uint32 peerId) {
 			}
 		} else {
 			sf::Packet forward;
-			forward << sourceId << sourceId << sequence << (sf::Uint32)0 << GIVE_FILE_LOCATION << filename << id;
+			forward << destId << sourceId << seq << (sf::Uint32)0 << GIVE_FILE_LOCATION << filename << id;
 
-			sendUpstream(forward, sourceId, sequence);
+			std::cout << "Passing file location upstream\n";
+
+			sendUpstream(forward, sourceId, seq);
 		}
 	} else if (message_type == TEST_QUERY) {
 		if (destId == myID) {
 			sf::Packet response;
-			response << sourceId << sourceId << sequence << (sf::Uint32)0 << TEST_RESPONSE;
+			response << sourceId << sourceId << seq << (sf::Uint32)0 << TEST_RESPONSE;
 
 			peer->socket.send(response);
 
 		} else {
 			sf::Packet forward;
-			forward << destId << sourceId << sequence << ttl - 1 << TEST_QUERY;
+			forward << destId << sourceId << seq << ttl - 1 << TEST_QUERY;
 			broadcastQuery(forward, peerId);
 		}
 	} else if (message_type == TEST_RESPONSE) {
@@ -199,7 +204,7 @@ void Client::handleMessageFromNetwork(sf::Uint32 peerId) {
 			}
 		} else {
 			sf::Packet forward;
-			forward << sourceId << sourceId << sequence << (sf::Uint32)0 << TEST_RESPONSE;
+			forward << sourceId << sourceId << seq << (sf::Uint32)0 << TEST_RESPONSE;
 			broadcastQuery(forward, peerId);
 		}
 	} else {
@@ -473,14 +478,14 @@ bool Client::searchFile(std::string filename) {
 	return false;
 }
 
-bool Client::logQuery(sf::Uint32 peerId, sf::Uint32 sourceId, sf::Uint32 sequence, sf::Uint32 ttl) {
+bool Client::logQuery(sf::Uint32 peerId, sf::Uint32 sourceId, sf::Uint32 seq, sf::Uint32 ttl) {
 	for (auto &logitem : log) {
-		if (sequence == logitem.sequence && sourceId == logitem.sourceId) {
+		if (seq == logitem.sequence && sourceId == logitem.sourceId) {
 			return false;
 		}
 	}
 
-	LogItem l{peerId, sourceId, sequence, logTimer.getElapsedTime()};
+	LogItem l{peerId, sourceId, seq, logTimer.getElapsedTime()};
 	log.push_back(l);
 
 	return true;
@@ -494,9 +499,9 @@ void Client::broadcastQuery(sf::Packet message, sf::Uint32 peerId) {
 	}
 }
 
-void Client::sendUpstream(sf::Packet message, sf::Uint32 sourceId, sf::Uint32 sequence) {
+void Client::sendUpstream(sf::Packet message, sf::Uint32 sourceId, sf::Uint32 seq) {
 	for (auto &logitem : log) {
-		if (sequence == logitem.sequence && sourceId == logitem.sourceId) {
+		if (seq == logitem.sequence && sourceId == logitem.sourceId) {
 			peers[logitem.upstream]->socket.send(message);
 		}
 	}
@@ -507,7 +512,10 @@ void Client::flushLog() {
 	while (i != log.end()) {
 		if (logTimer.getElapsedTime().asSeconds() > i->time.asSeconds() + 20.0) {
 			log.erase(i++);
+		}else{
+			i++;
 		}
+
 	}
 }
 

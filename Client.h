@@ -56,10 +56,10 @@ private:
 	void removeIncompleteFile(std::string filename);
 
 	std::list<LogItem> log;
-	bool logQuery(sf::Uint32 peerId, sf::Uint32 sourceId, sf::Uint32 sequence, sf::Uint32 ttl);
+	bool logQuery(sf::Uint32 peerId, sf::Uint32 sourceId, sf::Uint32 seq, sf::Uint32 ttl);
 
 	void broadcastQuery(sf::Packet message, sf::Uint32 peerId);
-	void sendUpstream(sf::Packet message, sf::Uint32 sourceId, sf::Uint32 sequence);
+	void sendUpstream(sf::Packet message, sf::Uint32 sourceId, sf::Uint32 seq);
 
 	sf::Uint32 myID;
 	std::string myIp;
