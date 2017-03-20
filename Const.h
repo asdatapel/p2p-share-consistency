@@ -14,5 +14,6 @@ const sf::Int32 NOTIFY_STARTING_TRANSFER = 6;
 const sf::Int32 GIVE_FILE_PORTION = 7;
 const sf::Int32 TEST_QUERY = 8;
 const sf::Int32 TEST_RESPONSE = 9;
+const sf::Int32 INVALIDATE = 10;
 
 #endif //P2P_SHARE_CONST_H

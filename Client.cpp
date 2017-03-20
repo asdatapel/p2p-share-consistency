@@ -207,6 +207,24 @@ void Client::handleMessageFromNetwork(sf::Uint32 peerId) {
 			forward << sourceId << sourceId << seq << (sf::Uint32)0 << TEST_RESPONSE;
 			broadcastQuery(forward, peerId);
 		}
+	} else if (message_type == INVALIDATE) {
+		std::string filename;
+		sf::Int32 version;
+		packet >> filename >> version;
+		if (ttl > 0 && logQuery(peerId, sourceId, seq, ttl)) {
+
+			for (auto& f : copyIndex) {
+				if (f.name == filename){
+					f.masterVersion = version;
+				}
+			}
+
+			sf::Packet forward;
+			forward << destId << sourceId << seq << ttl - 1 << INVALIDATE << filename << version;
+
+			broadcastQuery(forward, peerId);
+			std::cout << "File Invaildated & Forwarding invalidation for file: " << filename << "\n";
+		}
 	} else {
 		std::cout << "Received unknown message type from network peer: {" << peer->toString() << "} header: " << message_type
 				  << "\n";
@@ -258,9 +276,11 @@ bool Client::handleMessage(Connection *peer) {
 		File file;
 		file.initFromDisk(filename);
 
+		FileInfo *fileInfo = getFileInfo(filename);
+
 		sf::Packet response;
 		response << NOTIFY_STARTING_TRANSFER;
-		response << filename << (sf::Uint32) file.size;
+		response << filename << (sf::Uint32) file.size << fileInfo->originServer << fileInfo->version ;
 		peer->socket.send(response);
 
 		file.send(peer);
@@ -269,7 +289,17 @@ bool Client::handleMessage(Connection *peer) {
 	} else if (message_type == NOTIFY_STARTING_TRANSFER) {
 		std::string filename;
 		sf::Uint32 size;
-		packet >> filename >> size;
+		sf::Uint32 originServer;
+		sf::Int32 version;
+		packet >> filename >> size >> originServer >> version;
+
+		FileInfo f;
+		f.version = version;
+		f.masterVersion = version;
+		f.name = filename;
+		f.isValid = true;
+		f.originServer = originServer;
+		copyIndex.push_back(f);
 
 		File file;
 		file.init(filename, size);
@@ -313,8 +343,14 @@ void Client::handleInput(std::string input) {
 		broadcastQuery(message, myID);
 
 	} else if (commandParts[0] == "addfile") {
-		index.push_back(commandParts[1]);
-		std::cout << "File added to index: " << commandParts[1] << "\n";
+		FileInfo f;
+		f.version = 0;
+		f.masterVersion = 0;
+		f.name = commandParts[1];
+		f.isValid = true;
+		f.originServer = myID;
+		masterIndex.push_back(f);
+		std::cout << "File added to master index: " << commandParts[1] << "\n";
 	} else if (commandParts[0] == "testresponse") { //test response time
 		int n = std::stoi(commandParts[2]);
 		pendingResponses = n;
@@ -333,6 +369,29 @@ void Client::handleInput(std::string input) {
 		}
 
 		lock.lock();
+
+	} else if (commandParts[0] == "modifyfile") {
+		std::string filename = commandParts[1];
+		FileInfo *f = getFileInfo(filename);
+
+		f->version++;
+		f->masterVersion++;
+
+		sf::Packet message;
+		message << myID << myID << ++sequence << (sf::Uint32)20 << INVALIDATE << filename << f->masterVersion;
+		broadcastQuery(message, myID);
+
+		std::cout << "Modified file\n";
+
+	} else if (commandParts[0] == "printfiles") {
+		std::cout << "Master files:\n";
+		for (auto& f : masterIndex){
+			std::cout << f.name << ", " << f.masterVersion << "\n";
+		}
+		std::cout << "\nCopy files:\n";
+		for (auto& f : copyIndex){
+			std::cout << f.name << ", " << f.masterVersion << "\n";
+		}
 
 	} else {
 		std::cout << "Sorry, unknown command\n";
@@ -470,8 +529,13 @@ Connection *Client::findPeer(std::string ip, sf::Uint32 port) {
 }
 
 bool Client::searchFile(std::string filename) {
-	for (int i = 0; i < index.size(); ++i) {
-		if (filename == index[i]) {
+	for (int i = 0; i < masterIndex.size(); ++i) {
+		if (filename == masterIndex[i].name) {
+			return true;
+		}
+	}
+	for (int i = 0; i < copyIndex.size(); ++i) {
+		if (filename == copyIndex[i].name && copyIndex[i].version == copyIndex[i].masterVersion) {
 			return true;
 		}
 	}
@@ -479,6 +543,9 @@ bool Client::searchFile(std::string filename) {
 }
 
 bool Client::logQuery(sf::Uint32 peerId, sf::Uint32 sourceId, sf::Uint32 seq, sf::Uint32 ttl) {
+	if (sourceId == myID){
+		return false;
+	}
 	for (auto &logitem : log) {
 		if (seq == logitem.sequence && sourceId == logitem.sourceId) {
 			return false;
@@ -517,5 +584,18 @@ void Client::flushLog() {
 		}
 
 	}
+}
+FileInfo* Client::getFileInfo(std::string filename) {
+	for (int i = 0; i < masterIndex.size(); ++i) {
+		if (filename == masterIndex[i].name) {
+			return &masterIndex[i];
+		}
+	}
+	for (int i = 0; i < copyIndex.size(); ++i) {
+		if (filename == copyIndex[i].name) {
+			return &copyIndex[i];
+		}
+	}
+	return nullptr;
 }
 

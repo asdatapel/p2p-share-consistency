@@ -30,6 +30,15 @@ struct Node {
 	sf::Uint32 port;
 };
 
+struct FileInfo{
+	sf::Uint32 originServer;
+	std::string name;
+	sf::Int32 version;
+	sf::Int32 masterVersion;
+
+	bool isValid;
+};
+
 class Client {
 public:
 	Client(sf::Uint32 id);
@@ -47,9 +56,12 @@ private:
 
 	std::mutex lock;
 
-	std::vector<std::string> index;
+	std::vector<FileInfo> masterIndex;
+	std::vector<FileInfo> copyIndex;
 	std::set<std::string> pendingRequests;
 	bool searchFile(std::string filename);
+
+	FileInfo *getFileInfo(std::string filename);
 
 	std::vector<File> incompleteFiles;
 	File *findIncompleteFile(std::string filename);
