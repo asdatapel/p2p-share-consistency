@@ -1,7 +1,10 @@
 #include "Client.h"
 
-Client::Client(sf::Uint32 id) {
+Client::Client(sf::Uint32 id, ConsistencyMode c) {
 	myID = id;
+	consistencyMode = c;
+
+	defaultTtr = 20;
 
 	timeToExit = false;
 	myIp = sf::IpAddress::getPublicAddress(sf::seconds(10)).toString();
@@ -23,7 +26,7 @@ void Client::init() {
 	readConfigFile();
 	connectToPeers();
 
-	if (listener.listen(listenerPort) != sf::Socket::Done){
+	if (listener.listen(listenerPort) != sf::Socket::Done) {
 		std::cout << "Could not bind socket. Please wait a short while before restarting\n";
 		exit(1);
 	}
@@ -44,9 +47,12 @@ void Client::go() {
 void Client::readConfigFile() {
 	std::ifstream input("config");
 
+	std::string line;
+	std::getline(input, line);
+	std::istringstream ss(line);
+	ss >> defaultTtr;
 
 	//read the list of peers with ids
-	std::string line;
 	while (std::getline(input, line)) {
 		std::istringstream ss(line);
 		sf::Uint32 id, port;
@@ -138,7 +144,7 @@ void Client::handleMessageFromNetwork(sf::Uint32 peerId) {
 
 		if (searchFile(filename)) {
 			sf::Packet response;
-			response << sourceId << sourceId << seq << (sf::Uint32)0 << GIVE_FILE_LOCATION << filename << myID;
+			response << sourceId << sourceId << seq << (sf::Uint32) 0 << GIVE_FILE_LOCATION << filename << myID;
 
 			peer->socket.send(response);
 
@@ -178,7 +184,7 @@ void Client::handleMessageFromNetwork(sf::Uint32 peerId) {
 			}
 		} else {
 			sf::Packet forward;
-			forward << destId << sourceId << seq << (sf::Uint32)0 << GIVE_FILE_LOCATION << filename << id;
+			forward << destId << sourceId << seq << (sf::Uint32) 0 << GIVE_FILE_LOCATION << filename << id;
 
 			std::cout << "Passing file location upstream\n";
 
@@ -187,7 +193,7 @@ void Client::handleMessageFromNetwork(sf::Uint32 peerId) {
 	} else if (message_type == TEST_QUERY) {
 		if (destId == myID) {
 			sf::Packet response;
-			response << sourceId << sourceId << seq << (sf::Uint32)0 << TEST_RESPONSE;
+			response << sourceId << sourceId << seq << (sf::Uint32) 0 << TEST_RESPONSE;
 
 			peer->socket.send(response);
 
@@ -199,22 +205,22 @@ void Client::handleMessageFromNetwork(sf::Uint32 peerId) {
 	} else if (message_type == TEST_RESPONSE) {
 		if (destId == myID) {
 			--pendingResponses;
-			if (pendingResponses == 0){
+			if (pendingResponses == 0) {
 				std::cout << "Response time: " << timer.getElapsedTime().asMilliseconds() << " ms\n";
 			}
 		} else {
 			sf::Packet forward;
-			forward << sourceId << sourceId << seq << (sf::Uint32)0 << TEST_RESPONSE;
+			forward << sourceId << sourceId << seq << (sf::Uint32) 0 << TEST_RESPONSE;
 			broadcastQuery(forward, peerId);
 		}
 	} else if (message_type == INVALIDATE) {
 		std::string filename;
 		sf::Int32 version;
 		packet >> filename >> version;
-		if (ttl > 0 && logQuery(peerId, sourceId, seq, ttl)) {
+		if (ttl > 0 && logQuery(peerId, sourceId, seq, ttl) && consistencyMode == Push) {
 
-			for (auto& f : copyIndex) {
-				if (f.name == filename){
+			for (auto &f : copyIndex) {
+				if (f.name == filename) {
 					f.masterVersion = version;
 				}
 			}
@@ -225,8 +231,54 @@ void Client::handleMessageFromNetwork(sf::Uint32 peerId) {
 			broadcastQuery(forward, peerId);
 			std::cout << "File Invaildated & Forwarding invalidation for file: " << filename << "\n";
 		}
+	} else if (message_type == QUERY_VALID) {
+		std::string filename;
+		packet >> filename;
+		if (destId == myID) {
+			sf::Packet response;
+			FileInfo *f = getFileInfo(filename);
+			response << sourceId << sourceId << seq << (sf::Uint32) 0 << RESPONSE_VALID << filename << f->masterVersion;
+
+			peer->socket.send(response);
+
+			std::cout << "Sent Validation response for " << filename << "\n";
+
+		} else {
+			if (ttl > 0 && logQuery(peerId, sourceId, seq, ttl)) {
+				sf::Packet forward;
+				forward << destId << sourceId << seq << ttl - 1 << QUERY_VALID << filename;
+
+				broadcastQuery(forward, peerId);
+				std::cout << "Forwarding validation query for file: " << filename << "\n";
+			}
+		}
+	} else if (message_type == RESPONSE_VALID) {
+		std::string filename;
+		sf::Int32 version;
+		packet >> filename >> version;
+		if (destId == myID) {
+			FileInfo *f = getFileInfo(filename);
+			f->masterVersion = version;
+			if (f->version == f->masterVersion) {
+				f->lastValidTime = static_cast<sf::Int64> (time(NULL));
+				f->isValid = true;
+				f->didQuery = false;
+
+				std::cout << "File " << filename << " confirmed valid\n";
+			} else {
+				std::cout << "File " << filename << " is out of date\n";
+			}
+		} else {
+			sf::Packet forward;
+			forward << destId << sourceId << seq << (sf::Uint32) 0 << RESPONSE_VALID << filename << version;
+
+			std::cout << "Passing file validation response upstream\n";
+
+			sendUpstream(forward, sourceId, seq);
+		}
 	} else {
-		std::cout << "Received unknown message type from network peer: {" << peer->toString() << "} header: " << message_type
+		std::cout << "Received unknown message type from network peer: {" << peer->toString() << "} header: "
+				  << message_type
 				  << "\n";
 	}
 }
@@ -280,7 +332,8 @@ bool Client::handleMessage(Connection *peer) {
 
 		sf::Packet response;
 		response << NOTIFY_STARTING_TRANSFER;
-		response << filename << (sf::Uint32) file.size << fileInfo->originServer << fileInfo->version ;
+		response << filename << (sf::Uint32) file.size << fileInfo->originServer << fileInfo->version << fileInfo->ttr
+				 << fileInfo->lastValidTime;
 		peer->socket.send(response);
 
 		file.send(peer);
@@ -291,15 +344,32 @@ bool Client::handleMessage(Connection *peer) {
 		sf::Uint32 size;
 		sf::Uint32 originServer;
 		sf::Int32 version;
-		packet >> filename >> size >> originServer >> version;
+		sf::Uint32 ttr;
+		sf::Int64 lastValidTime;
+		packet >> filename >> size >> originServer >> version >> ttr >> lastValidTime;
 
-		FileInfo f;
-		f.version = version;
-		f.masterVersion = version;
-		f.name = filename;
-		f.isValid = true;
-		f.originServer = originServer;
-		copyIndex.push_back(f);
+		FileInfo *oldF = getFileInfo(filename);
+		FileInfo newF;
+		FileInfo *f;
+		if (!oldF) {
+			f = &newF;
+		} else {
+			f = oldF;
+		}
+
+		f->version = version;
+		f->masterVersion = version;
+		f->name = filename;
+		f->isValid = true;
+		f->originServer = originServer;
+		f->ttr = ttr;
+		f->lastValidTime = lastValidTime;
+		f->didQuery = false;
+
+
+		if (!oldF) {
+			copyIndex.push_back(newF);
+		}
 
 		File file;
 		file.init(filename, size);
@@ -349,6 +419,9 @@ void Client::handleInput(std::string input) {
 		f.name = commandParts[1];
 		f.isValid = true;
 		f.originServer = myID;
+		f.lastValidTime = static_cast<sf::Int64> (time(NULL));
+		f.ttr = defaultTtr;
+		f.didQuery = false;
 		masterIndex.push_back(f);
 		std::cout << "File added to master index: " << commandParts[1] << "\n";
 	} else if (commandParts[0] == "testresponse") { //test response time
@@ -362,7 +435,7 @@ void Client::handleInput(std::string input) {
 
 		for (int i = 0; i < n; ++i) {
 			sf::Packet message;
-			message << (sf::Uint32)std::stoi(commandParts[1]) << myID << sequence << (sf::Uint32) 10 << TEST_QUERY;
+			message << (sf::Uint32) std::stoi(commandParts[1]) << myID << sequence << (sf::Uint32) 10 << TEST_QUERY;
 			++sequence;
 
 			broadcastQuery(message, myID);
@@ -377,26 +450,39 @@ void Client::handleInput(std::string input) {
 		f->version++;
 		f->masterVersion++;
 
-		sf::Packet message;
-		message << myID << myID << ++sequence << (sf::Uint32)20 << INVALIDATE << filename << f->masterVersion;
-		broadcastQuery(message, myID);
+		if (consistencyMode == Push) {
+			sf::Packet message;
+			message << myID << myID << ++sequence << (sf::Uint32) 20 << INVALIDATE << filename << f->masterVersion;
+			broadcastQuery(message, myID);
+		}
 
 		std::cout << "Modified file\n";
 
 	} else if (commandParts[0] == "printfiles") {
 		std::cout << "Master files:\n";
-		for (auto& f : masterIndex){
-			std::cout << f.name << ", " << f.masterVersion << "\n";
+		for (auto &f : masterIndex) {
+			std::cout << f.name << ", Version: " << f.masterVersion << ", Valid: " << (f.isValid ? "True" : "False");
 		}
-		std::cout << "\nCopy files:\n";
-		for (auto& f : copyIndex){
-			std::cout << f.name << ", " << f.masterVersion << "\n";
+		std::cout << "\nCached files:\n";
+		for (auto &f : copyIndex) {
+			std::cout << f.name << ", Version: " << f.masterVersion << ", Valid: " << (f.isValid ? "True" : "False");
 		}
+	} else if (commandParts[0] == "updatefile") {
+		std::string filename = commandParts[1];
+		FileInfo *f = getFileInfo(filename);
+		if (!f->isValid) {
+			sf::Packet message;
+			message << (sf::Uint32) 0 << myID << sequence << (sf::Uint32) 10 << QUERY_FILE_LOCATION << filename;
+			++sequence;
+			pendingRequests.insert(commandParts[1]);
 
+			broadcastQuery(message, myID);
+		} else {
+			std::cout << "File is still up to date\n";
+		}
 	} else {
 		std::cout << "Sorry, unknown command\n";
 	}
-
 	lock.unlock();
 }
 
@@ -410,6 +496,10 @@ void Client::incomingLoop() {
 		lock.lock();
 
 		flushLog();
+
+		if (consistencyMode == Pull) {
+			checkAllTtr();
+		}
 
 		if (!anythingReady) { // check if something actually came in
 			if (timeToExit) {
@@ -531,19 +621,28 @@ Connection *Client::findPeer(std::string ip, sf::Uint32 port) {
 bool Client::searchFile(std::string filename) {
 	for (int i = 0; i < masterIndex.size(); ++i) {
 		if (filename == masterIndex[i].name) {
+			masterIndex[i].lastValidTime = static_cast<sf::Int64> (time(NULL));
 			return true;
 		}
 	}
-	for (int i = 0; i < copyIndex.size(); ++i) {
-		if (filename == copyIndex[i].name && copyIndex[i].version == copyIndex[i].masterVersion) {
-			return true;
+	if (consistencyMode == Push) {
+		for (int i = 0; i < copyIndex.size(); ++i) {
+			if (filename == copyIndex[i].name && copyIndex[i].version == copyIndex[i].masterVersion) {
+				return true;
+			}
+		}
+	} else {
+		for (int i = 0; i < copyIndex.size(); ++i) {
+			if (filename == copyIndex[i].name && copyIndex[i].isValid) {
+				return true;
+			}
 		}
 	}
 	return false;
 }
 
 bool Client::logQuery(sf::Uint32 peerId, sf::Uint32 sourceId, sf::Uint32 seq, sf::Uint32 ttl) {
-	if (sourceId == myID){
+	if (sourceId == myID) {
 		return false;
 	}
 	for (auto &logitem : log) {
@@ -579,13 +678,14 @@ void Client::flushLog() {
 	while (i != log.end()) {
 		if (logTimer.getElapsedTime().asSeconds() > i->time.asSeconds() + 20.0) {
 			log.erase(i++);
-		}else{
+		} else {
 			i++;
 		}
 
 	}
 }
-FileInfo* Client::getFileInfo(std::string filename) {
+
+FileInfo *Client::getFileInfo(std::string filename) {
 	for (int i = 0; i < masterIndex.size(); ++i) {
 		if (filename == masterIndex[i].name) {
 			return &masterIndex[i];
@@ -599,3 +699,16 @@ FileInfo* Client::getFileInfo(std::string filename) {
 	return nullptr;
 }
 
+void Client::checkAllTtr() {
+	sf::Int64 t = static_cast<sf::Int64> (time(NULL));
+	for (int i = 0; i < copyIndex.size(); ++i) {
+		if (t >= copyIndex[i].lastValidTime + copyIndex[i].ttr && !copyIndex[i].didQuery) {
+			copyIndex[i].didQuery = true;
+			sf::Packet message;
+			message << copyIndex[i].originServer << myID << ++sequence << (sf::Uint32) 20 << QUERY_VALID
+					<< copyIndex[i].name;
+			broadcastQuery(message, myID);
+			std::cout << "TTR expired for " << copyIndex[i].name << ", sent validation request\n";
+		}
+	}
+}

@@ -10,6 +10,7 @@
 #include <sstream>
 #include <algorithm>
 #include <fstream>
+#include <chrono>
 
 #include <SFML/Network.hpp>
 
@@ -36,12 +37,23 @@ struct FileInfo{
 	sf::Int32 version;
 	sf::Int32 masterVersion;
 
+	sf::Uint32 ttr;
+	sf::Int64 lastValidTime;
+
 	bool isValid;
+	bool didQuery;
+
+	Connection* connection;
+};
+
+enum ConsistencyMode {
+	Push,
+	Pull
 };
 
 class Client {
 public:
-	Client(sf::Uint32 id);
+	Client(sf::Uint32 id, ConsistencyMode c);
 	~Client();
 
 	void init();
@@ -100,6 +112,10 @@ private:
 	sf::Clock logTimer;
 	void flushLog();
 
+	ConsistencyMode consistencyMode ;
+
+	sf::Uint32 defaultTtr;
+	void checkAllTtr();
 };
 
 #endif //P2P_SHARE_CLIENT_H
